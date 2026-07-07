@@ -55,6 +55,20 @@ TOOLS = {
 }
 
 
+def _json_safe(kwargs):
+    """Coerce numpy scalar types (e.g. np.int64) to native Python types so an
+    error payload that echoes them back always survives json.dumps()."""
+    safe = {}
+    for k, v in kwargs.items():
+        if hasattr(v, "item"):
+            try:
+                v = v.item()
+            except (ValueError, AttributeError):
+                pass
+        safe[k] = v
+    return safe
+
+
 def _round(x, nd=6):
     if isinstance(x, dict):
         return {k: _round(v, nd) for k, v in x.items()}
@@ -89,10 +103,10 @@ def dispatch(request: dict) -> dict:
     try:
         result = spec["fn"](**kwargs)
     except Exception as e:  # bad numeric input (e.g. vol<=0) -> explicit, never a guess
-        return {"ok": False, "error": f"{type(e).__name__}: {e}", "tool": tool, "inputs": kwargs}
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "tool": tool, "inputs": _json_safe(kwargs)}
 
     if not _is_finite(result):  # never hand back NaN/Inf as if it were trustworthy
-        return {"ok": False, "error": "non-finite result (NaN/Inf)", "tool": tool, "inputs": kwargs}
+        return {"ok": False, "error": "non-finite result (NaN/Inf)", "tool": tool, "inputs": _json_safe(kwargs)}
 
     return {
         "ok": True,

@@ -8,6 +8,7 @@ itself), plus determinism and the agent's fail-loud contract.
 import math
 import os
 import sys
+import warnings
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
@@ -114,6 +115,22 @@ def main() -> int:
     horizon_ratio = mc_10d["var"] / mc_1d["var"]
     checks["var_horizon_scales_like_sqrt_t"] = approx(horizon_ratio, math.sqrt(10), 0.3)
 
+    # Negative-VaR-is-intentional regression guard: when the expected return (mean)
+    # dominates volatility at the requested confidence, VaR/CVaR correctly come back
+    # negative (a projected gain), and dispatch must return ok:True for it -- not reject
+    # it as a degenerate/out-of-scope input. Negative sign here is a feature, not a bug,
+    # and must stay correctly signed (cvar >= var still holds even though both are
+    # negative).
+    neg_var = dispatch({"tool": "monte_carlo_var",
+                         "params": {"value": 1_000_000, "mean": 0.08, "vol": 0.02, "confidence": 0.95}})
+    checks["negative_var_accepted_ok_true"] = neg_var.get("ok") is True
+    checks["negative_var_correctly_signed"] = (
+        neg_var.get("ok") is True and neg_var["result"]["var"] < 0 and neg_var["result"]["cvar"] < 0
+    )
+    checks["negative_var_cvar_ge_var_still_holds"] = (
+        neg_var.get("ok") is True and neg_var["result"]["cvar"] >= neg_var["result"]["var"]
+    )
+
     # 7) agent fail-loud contract: never guesses on bad input
     checks["agent_unknown_tool"] = dispatch({"tool": "nope"}).get("ok") is False
     checks["agent_missing_param"] = dispatch({"tool": "black_scholes", "params": {"spot": 100}}).get("ok") is False
@@ -142,9 +159,37 @@ def main() -> int:
     checks["reject_bad_sims_negative"] = _bad("monte_carlo_var", value=1e6, mean=0.0, vol=0.02, sims=-5)
     checks["reject_oversized_sims"] = _bad("monte_carlo_var", value=1e6, mean=0.0, vol=0.02, sims=10_000_000)
     checks["reject_oversized_horizon"] = _bad("monte_carlo_var", value=1e6, mean=0.0, vol=0.02, horizon_days=100_000)
+    # Non-finite mean/value regression guard: mean/value had zero domain checks and let
+    # NaN/Inf silently reach numpy, returning ok:True with a NaN result plus a leaked
+    # RuntimeWarning.
+    checks["reject_mean_nan"] = _bad("monte_carlo_var", value=1e6, mean=float("nan"), vol=0.02)
+    checks["reject_mean_inf"] = _bad("monte_carlo_var", value=1e6, mean=float("inf"), vol=0.02)
+    checks["reject_value_nan"] = _bad("monte_carlo_var", value=float("nan"), mean=0.0, vol=0.02)
+    checks["reject_value_inf"] = _bad("monte_carlo_var", value=float("inf"), mean=0.0, vol=0.02)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        dispatch({"tool": "monte_carlo_var", "params": {"value": 1e6, "mean": float("nan"), "vol": 0.02}})
+        checks["reject_mean_nan_no_warning_leak"] = len(caught) == 0
+    # Joint sims*horizon_days memory-cap regression guard: sims and horizon_days are each
+    # individually capped, but the allocated array is shape (sims, horizon_days) so the
+    # caps multiply, not add -- both at their individual max together would allocate
+    # ~74.5GB. The joint bound must catch what the two independent per-parameter checks
+    # above (each valid alone) let through.
+    checks["reject_joint_sims_horizon_product"] = _bad(
+        "monte_carlo_var", value=1e6, mean=0.0, vol=0.02, sims=1_000_000, horizon_days=10_000
+    )
     checks["reject_degenerate_prices"] = _bad("portfolio_stats", prices=[100.0, 0.0, 100.0])
     checks["reject_negative_prices"] = _bad("portfolio_stats", prices=[100.0, -50.0])
     checks["reject_too_few_prices"] = _bad("portfolio_stats", prices=[100.0])
+    # Non-finite r regression guard: r=inf collapses exp(-r*t)->0 and cdf(d1)->1.0, so
+    # the BS call formula lands on a finite-but-garbage value (spot) that sails past
+    # dispatch's after-the-fact _is_finite() scrub. r must be validated at the source.
+    checks["reject_r_inf_black_scholes"] = _bad("black_scholes", **{**base, "r": float("inf")})
+    checks["reject_r_nan_black_scholes"] = _bad("black_scholes", **{**base, "r": float("nan")})
+    checks["reject_r_inf_greeks"] = _bad("greeks", **{**base, "r": float("inf")})
+    checks["reject_r_nan_greeks"] = _bad("greeks", **{**base, "r": float("nan")})
+    checks["reject_r_inf_implied_vol"] = _bad("implied_vol", price=10.45, spot=100, strike=100, t=1, r=float("inf"))
+    checks["reject_r_nan_implied_vol"] = _bad("implied_vol", price=10.45, spot=100, strike=100, t=1, r=float("nan"))
     # green: no bad-value guard may reject a clean request
     checks["accept_valid_put"] = dispatch({"tool": "black_scholes", "params": {**base, "kind": "put"}}).get("ok") is True
 

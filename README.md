@@ -18,6 +18,9 @@ pip install -e .
 Installs the one runtime dependency, `numpy`. Tested against Python 3.12 + numpy 2.5;
 `pyproject.toml` declares `numpy>=1.22`, `requires-python>=3.9`.
 
+For development (running the `pytest` suite in addition to `eval.py`), install the
+`dev` extra instead: `pip install -e '.[dev]'`. See `CONTRIBUTING.md`.
+
 ## Quickstart
 
 ```
@@ -39,7 +42,10 @@ Math checked against KNOWN values/identities, not against itself:
 - portfolio stats: positive annual return + ~0 drawdown on a monotone-up series; a
   series with (near-)zero true return variance reports `sharpe_ratio: None` (degenerate
   volatility) rather than dividing by floating-point noise;
-- **VaR is deterministic** (two runs identical), positive, and `CVaR ≥ VaR`;
+- **VaR is deterministic** (two runs identical) and `CVaR ≥ VaR`. VaR/CVaR are usually
+  positive (potential loss) but can legitimately come back **negative** when the expected
+  return dominates volatility at the chosen confidence — that means "projected gain," not
+  a bug (see "Honest scope" below);
 - **VaR horizon scaling tracks `sqrt(t)`**: a 10-day horizon simulates 10 independent
   daily shocks and compounds them, so VaR scales `~sqrt(10) ≈ 3.16x` the 1-day figure,
   not `(1+r)^10` (perfect-autocorrelation) growth;
@@ -94,10 +100,21 @@ historical bootstrap); 252-trading-day annualization; risk-free rate 0 for Sharp
 Word-for-word an implementation of standard textbook formulas — the value is the
 **auditable, deterministic, LLM-doesn't-do-the-math** delivery, not new math.
 
-Every dispatchable numeric input is capped since parameters can come from an untrusted
-LLM caller: `monte_carlo_var` rejects `sims > 1,000,000` or `horizon_days > 10,000`;
-`portfolio_stats` rejects `prices` longer than 1,000,000 points. All caps raise a clean
-`ValueError` rather than a raw internal traceback or an open-ended resource cost.
+Numeric inputs reachable from an untrusted LLM caller are guarded, not blanket-capped —
+here is exactly what's checked: `black_scholes`/`greeks`/`implied_vol` require finite
+`r` and a positive `spot`/`strike`/`t`/`vol`; `monte_carlo_var` requires finite
+`mean`/`value`, a positive `vol`, `confidence` in `(0, 1)`, `sims <= 1,000,000` and
+`horizon_days <= 10,000` individually **and** their product `sims * horizon_days <=
+10,000,000` (the two caps multiply, since the simulation allocates a `sims x
+horizon_days` array); `portfolio_stats` rejects `prices` longer than 1,000,000 points
+or containing a non-finite/non-positive value. All guards raise a clean `ValueError`
+rather than a raw internal traceback or an open-ended resource cost.
+
+**Negative VaR/CVaR is intentional, not a bug**: when the expected return (`mean`)
+dominates volatility at the requested `confidence`, the simulated loss distribution's
+tail is itself a gain, and `monte_carlo_var` reports that as a negative number rather
+than rejecting it or clamping it to zero — a downstream integrator should treat a
+negative figure as "projected gain," not an error.
 
 ## Where it fits
 

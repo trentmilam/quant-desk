@@ -21,7 +21,7 @@ def _pdf(x: float) -> float:
     return math.exp(-0.5 * x * x) / _SQRT2PI
 
 
-def _validate_bs(spot, strike, t, vol, kind):
+def _validate_bs(spot, strike, t, vol, kind, r):
     """Reject out-of-domain inputs loudly instead of returning a guessed number."""
     if kind not in ("call", "put"):
         raise ValueError(f"kind must be 'call' or 'put', got {kind!r}")
@@ -33,6 +33,8 @@ def _validate_bs(spot, strike, t, vol, kind):
         raise ValueError(f"t (time to expiry) must be > 0, got {t!r}")
     if not vol > 0:
         raise ValueError(f"vol must be > 0, got {vol!r}")
+    if not math.isfinite(r):
+        raise ValueError(f"r (risk-free rate) must be finite, got {r!r}")
 
 
 def _d1_d2(spot, strike, t, r, vol):
@@ -42,7 +44,7 @@ def _d1_d2(spot, strike, t, r, vol):
 
 def black_scholes(spot, strike, t, r, vol, kind="call"):
     """European option price (closed form)."""
-    _validate_bs(spot, strike, t, vol, kind)
+    _validate_bs(spot, strike, t, vol, kind, r)
     d1, d2 = _d1_d2(spot, strike, t, r, vol)
     if kind == "call":
         return spot * _cdf(d1) - strike * math.exp(-r * t) * _cdf(d2)
@@ -51,7 +53,7 @@ def black_scholes(spot, strike, t, r, vol, kind="call"):
 
 def greeks(spot, strike, t, r, vol, kind="call"):
     """delta (per $1), gamma (per $1), vega (per 1% vol), theta (per day), rho (per 1% rate)."""
-    _validate_bs(spot, strike, t, vol, kind)
+    _validate_bs(spot, strike, t, vol, kind, r)
     d1, d2 = _d1_d2(spot, strike, t, r, vol)
     gamma = _pdf(d1) / (spot * vol * math.sqrt(t))
     vega = spot * _pdf(d1) * math.sqrt(t) / 100.0
@@ -74,7 +76,7 @@ def implied_vol(price, spot, strike, t, r, kind="call", tol=1e-8, iters=200):
     a search-bound is never returned as if it were a genuine implied vol (fail-loud, not
     fail-open).
     """
-    _validate_bs(spot, strike, t, 1.0, kind)  # reuse spot/strike/t/kind guards (vol unused here)
+    _validate_bs(spot, strike, t, 1.0, kind, r)  # reuse spot/strike/t/kind/r guards (vol unused here)
     if not price > 0:
         raise ValueError(f"option price must be > 0, got {price!r}")
     disc_strike = strike * math.exp(-r * t)
@@ -110,6 +112,11 @@ def implied_vol(price, spot, strike, t, r, kind="call", tol=1e-8, iters=200):
 _MAX_PRICES = 1_000_000
 _MAX_SIMS = 1_000_000
 _MAX_HORIZON_DAYS = 10_000
+# rng.normal(mean, vol, (sims, horizon_days)) allocates sims * horizon_days floats, so
+# the two per-parameter caps above multiply rather than add -- both individually valid
+# at their max (1,000,000 x 10,000) would allocate ~74.5GB. Bound the product directly.
+# 10,000,000 elements is ~80MB for a float64 array: a safe absolute memory budget.
+_MAX_PATH_ELEMENTS = 10_000_000
 
 
 def portfolio_stats(prices):
@@ -150,9 +157,18 @@ def monte_carlo_var(value, mean, vol, horizon_days=1, confidence=0.95, sims=1000
     Simulates ``horizon_days`` INDEPENDENT daily shocks per path and compounds them --
     not one shock raised to a power, which would model perfect autocorrelation (the
     same return recurring every day of the horizon). Deterministic given a fixed seed.
+
+    VaR/CVaR can legitimately come back NEGATIVE: when the expected return (``mean``)
+    dominates ``vol`` at the requested ``confidence``, the loss distribution's tail is
+    itself a gain, and a negative figure means "projected gain," not an error -- this is
+    standard risk-practice behavior, not a bug, and is not rejected here.
     """
     import numpy as np
 
+    if not math.isfinite(mean):
+        raise ValueError(f"mean must be finite, got {mean!r}")
+    if not math.isfinite(value):
+        raise ValueError(f"value must be finite, got {value!r}")
     if not 0.0 < confidence < 1.0:
         raise ValueError(f"confidence must be in (0, 1), got {confidence!r}")
     if not vol > 0:
@@ -165,6 +181,11 @@ def monte_carlo_var(value, mean, vol, horizon_days=1, confidence=0.95, sims=1000
         raise ValueError(f"sims must be a positive integer, got {sims!r}")
     if sims > _MAX_SIMS:
         raise ValueError(f"sims must be <= {_MAX_SIMS}, got {sims!r}")
+    if sims * horizon_days > _MAX_PATH_ELEMENTS:
+        raise ValueError(
+            f"sims * horizon_days must be <= {_MAX_PATH_ELEMENTS}, "
+            f"got {sims!r} * {horizon_days!r} = {sims * horizon_days!r}"
+        )
     rng = np.random.default_rng(seed)
     daily = rng.normal(mean, vol, (sims, horizon_days))
     horizon_returns = np.prod(1 + daily, axis=1) - 1
