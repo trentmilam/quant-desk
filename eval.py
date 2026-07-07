@@ -88,6 +88,15 @@ def main() -> int:
     ps = quant.portfolio_stats(prices)
     checks["portfolio_return_positive"] = ps["annual_return"] > 0
     checks["portfolio_no_drawdown"] = approx(ps["max_drawdown"], 0.0, 1e-9)
+    # Regression guard: a perfectly steady series has (near-)zero true return
+    # variance, so np.std lands on floating-point noise (~1e-16) rather than an exact
+    # 0.0. An exact `!= 0` guard never fires on that noise and used to silently divide
+    # by it, returning sharpe_ratio ~1.6e15. The fix must either flag this as
+    # degenerate (sharpe_ratio is None) or keep the value sanely bounded -- never that
+    # silent astronomical number.
+    checks["portfolio_sharpe_not_silently_wrong"] = (
+        ps["sharpe_ratio"] is None or abs(ps["sharpe_ratio"]) < 1000
+    )
 
     # 6) VaR determinism (two runs identical) + positive + CVaR >= VaR
     v1 = quant.monte_carlo_var(1_000_000, 0.0, 0.02, 1, 0.95)
@@ -95,6 +104,15 @@ def main() -> int:
     checks["var_deterministic"] = v1 == v2
     checks["var_positive"] = v1["var"] > 0
     checks["cvar_ge_var"] = v1["cvar"] >= v1["var"]
+
+    # Regression guard: a multi-day horizon must simulate `horizon_days`
+    # INDEPENDENT daily shocks and compound them, not raise a single shock to a power
+    # (perfect autocorrelation), which inflated 10-day VaR ~9x instead of the correct
+    # ~3.16x = sqrt(10) for i.i.d. daily shocks.
+    mc_1d = quant.monte_carlo_var(1_000_000, 0.0, 0.02, horizon_days=1, confidence=0.95, sims=200_000)
+    mc_10d = quant.monte_carlo_var(1_000_000, 0.0, 0.02, horizon_days=10, confidence=0.95, sims=200_000)
+    horizon_ratio = mc_10d["var"] / mc_1d["var"]
+    checks["var_horizon_scales_like_sqrt_t"] = approx(horizon_ratio, math.sqrt(10), 0.3)
 
     # 7) agent fail-loud contract: never guesses on bad input
     checks["agent_unknown_tool"] = dispatch({"tool": "nope"}).get("ok") is False
@@ -116,6 +134,14 @@ def main() -> int:
     checks["reject_nonpos_strike"] = _bad("black_scholes", **{**base, "strike": -100})
     checks["reject_neg_vol_greeks"] = _bad("greeks", **{**base, "vol": -0.2})
     checks["reject_bad_confidence"] = _bad("monte_carlo_var", value=1e6, mean=0.0, vol=0.02, confidence=1.5)
+    # Validation guard: horizon_days/sims are on the untrusted dispatch surface
+    # and must fail loud, never silently return a zero/negative-horizon "result".
+    checks["reject_bad_horizon_zero"] = _bad("monte_carlo_var", value=1e6, mean=0.0, vol=0.02, horizon_days=0)
+    checks["reject_bad_horizon_negative"] = _bad("monte_carlo_var", value=1e6, mean=0.0, vol=0.02, horizon_days=-1)
+    checks["reject_bad_sims_zero"] = _bad("monte_carlo_var", value=1e6, mean=0.0, vol=0.02, sims=0)
+    checks["reject_bad_sims_negative"] = _bad("monte_carlo_var", value=1e6, mean=0.0, vol=0.02, sims=-5)
+    checks["reject_oversized_sims"] = _bad("monte_carlo_var", value=1e6, mean=0.0, vol=0.02, sims=10_000_000)
+    checks["reject_oversized_horizon"] = _bad("monte_carlo_var", value=1e6, mean=0.0, vol=0.02, horizon_days=100_000)
     checks["reject_degenerate_prices"] = _bad("portfolio_stats", prices=[100.0, 0.0, 100.0])
     checks["reject_negative_prices"] = _bad("portfolio_stats", prices=[100.0, -50.0])
     checks["reject_too_few_prices"] = _bad("portfolio_stats", prices=[100.0])

@@ -9,16 +9,26 @@ explicit error — never a guessed value.
 Built for the person who cannot ship a wrong number: analysts, wealth managers,
 prop-desk and advisory tooling that (rightly) distrusts LLM arithmetic.
 
+## Setup
+
+```
+pip install -e .
+```
+
+Installs the one runtime dependency, `numpy`. Tested against Python 3.12 + numpy 2.5;
+`pyproject.toml` declares `numpy>=1.22`, `requires-python>=3.9`.
+
 ## Quickstart
 
 ```
 python eval.py
 ```
 
-Self-contained: Black-Scholes pricing + greeks use `math.erf` (no scipy); portfolio
-stats and Monte-Carlo VaR use numpy with a fixed seed. Deterministic and offline.
+Black-Scholes pricing + greeks use `math.erf` (no scipy); portfolio stats and
+Monte-Carlo VaR use numpy with a fixed seed. Deterministic and offline, with one
+declared dependency (numpy).
 
-## Measured (eval.py, exit 0 — 42/42 checks)
+## Measured (eval.py, exit 0 — 50/50 checks)
 
 Math checked against KNOWN values/identities, not against itself:
 
@@ -26,13 +36,20 @@ Math checked against KNOWN values/identities, not against itself:
 - **put-call parity** `C - P == S - K·e^(-rt)` holds;
 - greeks sanity: `0 < delta_call < 1`, `gamma > 0`, `delta_call - delta_put == 1`;
 - **implied vol round-trips** to 0.2000;
-- portfolio stats: positive annual return + ~0 drawdown on a monotone-up series;
+- portfolio stats: positive annual return + ~0 drawdown on a monotone-up series; a
+  series with (near-)zero true return variance reports `sharpe_ratio: None` (degenerate
+  volatility) rather than dividing by floating-point noise;
 - **VaR is deterministic** (two runs identical), positive, and `CVaR ≥ VaR`;
-- **agent fail-loud contract**: unknown tool / missing param / unknown param all
-  return `ok:false`; only a valid request yields a number.
+- **VaR horizon scaling tracks `sqrt(t)`**: a 10-day horizon simulates 10 independent
+  daily shocks and compounds them, so VaR scales `~sqrt(10) ≈ 3.16x` the 1-day figure,
+  not `(1+r)^10` (perfect-autocorrelation) growth;
+- **agent fail-loud contract**: unknown tool / missing param / unknown param / a
+  non-object top-level request all return `ok:false`; only a valid request yields a
+  number.
 - **value-domain fail-loud**: bad `kind`, `vol<=0`, `t<=0`, `spot<=0`, `strike<=0`,
-  `confidence` outside `(0,1)`, and degenerate/non-positive/too-few price series all
-  return `ok:false`; no `NaN`/`Inf` is ever returned as `ok:true`.
+  `confidence` outside `(0,1)`, non-positive/oversized `sims`, non-positive/oversized
+  `horizon_days`, and degenerate/non-positive/too-few price series all return
+  `ok:false`; no `NaN`/`Inf` is ever returned as `ok:true`.
 - **implied-vol no-arbitrage guard**: an observed option price that is non-positive or
   violates its no-arbitrage bounds (e.g. a call `> spot` or `< intrinsic`) returns
   `ok:false` — the bisection never hands back a search-bound as if it were a real vol,
@@ -64,7 +81,7 @@ dispatch({"tool": "black_scholes",
           "params": {"spot":100,"strike":100,"t":1,"r":0.05,"vol":0.2}})
 # -> {"ok":True,"tool":"black_scholes","inputs":{...},
 #     "method":"closed-form Black-Scholes (normal CDF via math.erf)",
-#     "deterministic":True,"result":10.4506}
+#     "deterministic":True,"result":10.450584}
 ```
 
 Tools: `black_scholes`, `greeks`, `implied_vol`, `portfolio_stats`, `monte_carlo_var`.
@@ -77,8 +94,13 @@ historical bootstrap); 252-trading-day annualization; risk-free rate 0 for Sharp
 Word-for-word an implementation of standard textbook formulas — the value is the
 **auditable, deterministic, LLM-doesn't-do-the-math** delivery, not new math.
 
+Every dispatchable numeric input is capped since parameters can come from an untrusted
+LLM caller: `monte_carlo_var` rejects `sims > 1,000,000` or `horizon_days > 10,000`;
+`portfolio_stats` rejects `prices` longer than 1,000,000 points. All caps raise a clean
+`ValueError` rather than a raw internal traceback or an open-ended resource cost.
+
 ## Where it fits
 
-A **compute module** for the Consilium switchboard — the v3
-step of heterogeneous modules that mix retrieval (cite a source) with computation
-(return an audited number). Part of the wealth-tech portfolio track.
+Designed to compose with other audited compute modules in a larger agent system:
+retrieval components cite a source, this kind of module returns an audited number,
+and neither lets an LLM guess at the underlying fact.

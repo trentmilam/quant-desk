@@ -107,21 +107,37 @@ def implied_vol(price, spot, strike, t, r, kind="call", tol=1e-8, iters=200):
     return mid
 
 
+_MAX_PRICES = 1_000_000
+_MAX_SIMS = 1_000_000
+_MAX_HORIZON_DAYS = 10_000
+
+
 def portfolio_stats(prices):
-    """Annualized return/vol (252d), Sharpe (rf=0), max drawdown (peak-to-trough)."""
+    """Annualized return/vol (252d), Sharpe (rf=0, None if volatility is degenerate),
+    max drawdown (peak-to-trough)."""
     import numpy as np
 
     if len(prices) < 2:
         raise ValueError("need at least 2 price points")
+    if len(prices) > _MAX_PRICES:
+        raise ValueError(f"prices length must be <= {_MAX_PRICES}, got {len(prices)}")
     p = np.asarray(prices, dtype=float)
     if not np.all(np.isfinite(p)):
         raise ValueError("prices must all be finite")
     if not np.all(p > 0):
         raise ValueError("prices must all be > 0 (a non-positive price yields Inf/NaN stats)")
     rets = np.diff(p) / p[:-1]
+    daily_vol = float(np.std(rets))
     ann_return = float(np.mean(rets)) * 252
-    ann_vol = float(np.std(rets)) * math.sqrt(252)
-    sharpe = float(ann_return / ann_vol) if ann_vol != 0 else 0.0
+    ann_vol = daily_vol * math.sqrt(252)
+    # A return series with (near-)zero true variance lands `np.std` on floating-point
+    # noise (e.g. ~1e-16) rather than an exact 0.0, so an exact `!= 0` guard never
+    # fires and the code would silently divide by that noise -- finite but nonsense.
+    # Treat volatility as degenerate when it's within a relative epsilon of the scale
+    # of the returns that produced it (mean absolute daily return), not just zero.
+    ret_scale = float(np.mean(np.abs(rets)))
+    vol_epsilon = ret_scale * 1e-8
+    sharpe = float(ann_return / ann_vol) if daily_vol > vol_epsilon else None
     running_max = np.maximum.accumulate(p)
     max_dd = float(np.min(p / running_max - 1.0))
     return {"annual_return": ann_return, "annual_volatility": ann_vol,
@@ -129,16 +145,29 @@ def portfolio_stats(prices):
 
 
 def monte_carlo_var(value, mean, vol, horizon_days=1, confidence=0.95, sims=10000, seed=12345):
-    """Monte-Carlo VaR + Expected Shortfall (CVaR), positive = potential loss. Deterministic (fixed seed)."""
+    """Monte-Carlo VaR + Expected Shortfall (CVaR), positive = potential loss.
+
+    Simulates ``horizon_days`` INDEPENDENT daily shocks per path and compounds them --
+    not one shock raised to a power, which would model perfect autocorrelation (the
+    same return recurring every day of the horizon). Deterministic given a fixed seed.
+    """
     import numpy as np
 
     if not 0.0 < confidence < 1.0:
         raise ValueError(f"confidence must be in (0, 1), got {confidence!r}")
     if not vol > 0:
         raise ValueError(f"vol must be > 0, got {vol!r}")
+    if not isinstance(horizon_days, int) or horizon_days < 1:
+        raise ValueError(f"horizon_days must be a positive integer, got {horizon_days!r}")
+    if horizon_days > _MAX_HORIZON_DAYS:
+        raise ValueError(f"horizon_days must be <= {_MAX_HORIZON_DAYS}, got {horizon_days!r}")
+    if not isinstance(sims, int) or sims <= 0:
+        raise ValueError(f"sims must be a positive integer, got {sims!r}")
+    if sims > _MAX_SIMS:
+        raise ValueError(f"sims must be <= {_MAX_SIMS}, got {sims!r}")
     rng = np.random.default_rng(seed)
-    daily = rng.normal(mean, vol, int(sims))
-    horizon_returns = (1 + daily) ** horizon_days - 1
+    daily = rng.normal(mean, vol, (sims, horizon_days))
+    horizon_returns = np.prod(1 + daily, axis=1) - 1
     pnl = float(value) * horizon_returns
     var_value = float(np.percentile(pnl, (1.0 - confidence) * 100))
     tail = pnl[pnl <= var_value]

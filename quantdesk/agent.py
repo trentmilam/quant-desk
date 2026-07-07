@@ -65,6 +65,8 @@ def _round(x, nd=6):
 
 def dispatch(request: dict) -> dict:
     """request = {"tool": <name>, "params": {...}} -> audited result dict."""
+    if not isinstance(request, dict):
+        return {"ok": False, "error": f"request must be an object, got {type(request).__name__}"}
     tool = request.get("tool")
     spec = TOOLS.get(tool)
     if spec is None:
