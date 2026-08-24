@@ -33,7 +33,7 @@ stats and Monte-Carlo VaR (a worst-case-loss estimate built from simulated price
 paths) use numpy with a fixed seed. Deterministic and offline, with one declared
 dependency (numpy).
 
-## Measured (eval.py, exit 0 — 50/50 checks)
+## Measured (eval.py, exit 0 — 65/65 checks)
 
 Math checked against known values and identities, not against itself:
 
