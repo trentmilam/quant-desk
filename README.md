@@ -1,3 +1,18 @@
+> ### This project moved
+>
+> quant-desk now lives inside **[wealth-guardrails](https://github.com/trentmilam/wealth-guardrails)**,
+> as [`quant-desk/`](https://github.com/trentmilam/wealth-guardrails/tree/main/quant-desk) —
+> alongside fee-forensics, tail-risk and mandate-monitor.
+>
+> It is the exact-arithmetic layer those three reason about rather than a separate product, and
+> it is better read next to them. Its full commit history moved with it, and it runs in that
+> repo's CI on every push.
+>
+> This repository is archived and stays here so existing links keep working. The code below is
+> the last standalone version.
+
+---
+
 # quant-desk — deterministic finance math for LLM agents
 
 LLMs are confidently wrong at arithmetic. quant-desk does the finance math in exact,
